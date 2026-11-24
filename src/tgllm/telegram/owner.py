@@ -24,6 +24,8 @@ from tgllm.telegram.keyboards import (
 )
 
 if TYPE_CHECKING:
+    from aiogram.types import InlineKeyboardMarkup
+
     from tgllm.telegram.bot import AppState
 
 logger = logging.getLogger(__name__)
@@ -34,37 +36,37 @@ class OwnerFlow(StatesGroup):
 
 
 class IsOwner(BaseFilter):
-    def __init__(self, state: AppState) -> None:
-        self.state = state
+    def __init__(self, app: AppState) -> None:
+        self.app = app
 
     async def __call__(self, event: TelegramObject, **kwargs: object) -> bool:
         user = getattr(event, "from_user", None)
-        return bool(user and user.id == self.state.config.owner_id)
+        return bool(user and user.id == self.app.config.owner_id)
 
 
 async def _send_or_edit(
-    state: AppState,
+    app: AppState,
     chat_id: int,
     message_id: int | None,
     text: str,
-    markup=None,  # noqa: ANN001 - InlineKeyboardMarkup | None
+    markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     if message_id is None:
-        await state.bot.send_message(chat_id, text, reply_markup=markup)
+        await app.bot.send_message(chat_id, text, reply_markup=markup)
         return
     try:
-        await state.bot.edit_message_text(
+        await app.bot.edit_message_text(
             text=text, chat_id=chat_id, message_id=message_id, reply_markup=markup
         )
     except TelegramBadRequest as exc:
         if "not modified" in str(exc).lower():
             return
-        await state.bot.send_message(chat_id, text, reply_markup=markup)
+        await app.bot.send_message(chat_id, text, reply_markup=markup)
 
 
-async def show_main(state: AppState, chat_id: int, message_id: int | None = None) -> None:
-    model = state.resolve_model()
-    status = await state.server.status()
+async def show_main(app: AppState, chat_id: int, message_id: int | None = None) -> None:
+    model = app.resolve_model()
+    status = await app.server.status()
     if status.healthy:
         icon = "✅"
     elif status.pid is not None:
@@ -74,23 +76,23 @@ async def show_main(state: AppState, chat_id: int, message_id: int | None = None
     text = (
         "⚙️ Управление ботом\n\n"
         f"Модель: {model.short_name if model else '—'}\n"
-        f"Сервер: {icon} · порт {state.config.llm_port}\n\n"
+        f"Сервер: {icon} · порт {app.config.llm_port}\n\n"
         "Выбери раздел:"
     )
-    await _send_or_edit(state, chat_id, message_id, text, main_menu())
+    await _send_or_edit(app, chat_id, message_id, text, main_menu())
 
 
 async def show_section(
-    state: AppState, chat_id: int, message_id: int | None, section_key: str
+    app: AppState, chat_id: int, message_id: int | None, section_key: str
 ) -> None:
     if section_key == "access":
-        await show_access(state, chat_id, message_id)
+        await show_access(app, chat_id, message_id)
         return
     section = SECTIONS.get(section_key)
     if section is None:
-        await show_main(state, chat_id, message_id)
+        await show_main(app, chat_id, message_id)
         return
-    values = state.store.snapshot()
+    values = app.store.snapshot()
     restart_note = (
         "\n⚠️ Изменения применятся после перезапуска сервера."
         if any(spec.restart for spec in section.specs)
@@ -102,25 +104,23 @@ async def show_section(
         "Нажми на параметр, чтобы изменить значение. "
         "Для параметров с вариантами нажатие переключает значение."
     )
-    await _send_or_edit(state, chat_id, message_id, text, section_menu(section, values))
+    await _send_or_edit(app, chat_id, message_id, text, section_menu(section, values))
 
 
 async def show_models(
-    state: AppState, chat_id: int, message_id: int | None = None, rescan: bool = False
+    app: AppState, chat_id: int, message_id: int | None = None, rescan: bool = False
 ) -> None:
-    state.models = scan_models(state.config.models_dirs)
-    current = state.store.get_str("model")
+    app.models = scan_models(app.config.models_dirs)
+    current = app.store.get_str("model")
     if rescan:
-        model = choose_model(state.models, current)
+        model = choose_model(app.models, current)
         if model is not None and not any(
-            str(item.path) == current for item in state.models
+            str(item.path) == current for item in app.models
         ):
-            await state.store.set("model", str(model.path))
+            await app.store.set("model", str(model.path))
             current = str(model.path)
-    current_model = next(
-        (item for item in state.models if str(item.path) == current), None
-    )
-    dirs = "\n".join(f"• {path}" for path in state.config.models_dirs)
+    current_model = next((item for item in app.models if str(item.path) == current), None)
+    dirs = "\n".join(f"• {path}" for path in app.config.models_dirs)
     context = (
         f"\nКонтекст модели: {current_model.context_length}"
         if current_model and current_model.context_length
@@ -134,19 +134,17 @@ async def show_models(
         f"Каталоги поиска:\n{dirs}\n\n"
         "Нажми на модель, чтобы переключить. Сервер перезапустится."
     )
-    await _send_or_edit(
-        state, chat_id, message_id, text, model_menu(state.models, current)
-    )
+    await _send_or_edit(app, chat_id, message_id, text, model_menu(app.models, current))
 
 
 async def show_access(
-    state: AppState, chat_id: int, message_id: int | None = None
+    app: AppState, chat_id: int, message_id: int | None = None
 ) -> None:
-    allowed = await state.db.allowed_users()
+    allowed = await app.db.allowed_users()
     lines = [
         "👥 Доступ",
         "",
-        f"Владелец: {state.config.owner_id}",
+        f"Владелец: {app.config.owner_id}",
         f"Разрешённых пользователей: {len(allowed)}",
         "",
         "Добавить: /allow <id>",
@@ -155,28 +153,28 @@ async def show_access(
         "ID пользователя виден ему в сообщении об отказе.",
     ]
     await _send_or_edit(
-        state, chat_id, message_id, "\n".join(lines), access_menu(allowed, state.config.owner_id)
+        app, chat_id, message_id, "\n".join(lines), access_menu(allowed, app.config.owner_id)
     )
 
 
 async def show_server(
-    state: AppState, chat_id: int, message_id: int | None = None
+    app: AppState, chat_id: int, message_id: int | None = None
 ) -> None:
-    status = await state.server.status()
-    model = state.resolve_model()
+    status = await app.server.status()
+    model = app.resolve_model()
     if status.healthy:
         icon = "✅ работает"
     elif status.pid is not None:
         icon = f"⏳ запускается (pid {status.pid})"
     else:
         icon = "❌ остановлен"
-    loaded = await state.server.current_model() if status.healthy else None
-    values = state.store.snapshot()
+    loaded = await app.server.current_model() if status.healthy else None
+    values = app.store.snapshot()
     lines = [
         "🖥 llama-server",
         "",
         f"Статус: {icon}",
-        f"Порт: {state.config.llm_port}",
+        f"Порт: {app.config.llm_port}",
         f"Модель в настройках: {model.short_name if model else '—'}",
     ]
     if loaded is not None:
@@ -187,52 +185,50 @@ async def show_server(
         f"KV: {values['cache_type_k']}/{values['cache_type_v']}",
         f"Слотов: {values['parallel']} · threads: {values['threads']}",
     ]
-    await _send_or_edit(state, chat_id, message_id, "\n".join(lines), server_menu())
+    await _send_or_edit(app, chat_id, message_id, "\n".join(lines), server_menu())
 
 
 async def restart_flow(
-    state: AppState,
+    app: AppState,
     chat_id: int,
     message_id: int | None,
     model: ModelInfo | None = None,
     reason: str = "Перезапускаю сервер",
 ) -> None:
-    model = model or state.resolve_model()
+    model = model or app.resolve_model()
     if model is None:
         await _send_or_edit(
-            state,
+            app,
             chat_id,
             message_id,
             "❌ Не найдено ни одной .gguf-модели.\n"
             "Положи файл в один из каталогов MODELS_DIRS и обнови список в /model.",
         )
         return
-    await _send_or_edit(state, chat_id, message_id, f"⏳ {reason}…")
-    if state.gate.locked():
-        await _send_or_edit(
-            state, chat_id, message_id, "⏳ Жду завершения текущего ответа…"
-        )
+    await _send_or_edit(app, chat_id, message_id, f"⏳ {reason}…")
+    if app.gate.locked():
+        await _send_or_edit(app, chat_id, message_id, "⏳ Жду завершения текущего ответа…")
     try:
-        async with state.gate:
+        async with app.gate:
             await _send_or_edit(
-                state,
+                app,
                 chat_id,
                 message_id,
                 f"⏳ Запускаю {model.short_name}…\nЭто может занять до минуты.",
             )
-            await state.server.start(model.path)
+            await app.server.start(model.path)
         await _send_or_edit(
-            state,
+            app,
             chat_id,
             message_id,
             f"✅ Готово. Модель: {model.short_name}\n"
-            f"Порт: {state.config.llm_port} · ctx-size: {state.store.get_int('ctx_size')}",
+            f"Порт: {app.config.llm_port} · ctx-size: {app.store.get_int('ctx_size')}",
             server_menu(),
         )
     except Exception as exc:  # noqa: BLE001 - показываем причину владельцу
         logger.exception("Не удалось запустить llama-server")
         await _send_or_edit(
-            state,
+            app,
             chat_id,
             message_id,
             f"❌ Не удалось запустить сервер:\n{str(exc)[:3200]}",
@@ -240,13 +236,13 @@ async def restart_flow(
         )
 
 
-def build_owner_router(state: AppState) -> Router:
+def build_owner_router(app: AppState) -> Router:
     router = Router(name="owner")
-    owner = IsOwner(state)
+    owner = IsOwner(app)
 
     @router.message(owner, CommandStart())
     async def cmd_start(message: Message) -> None:
-        model = state.resolve_model()
+        model = app.resolve_model()
         await message.answer(
             "👋 Привет, владелец!\n"
             f"Модель: {model.short_name if model else '—'}\n\n"
@@ -273,23 +269,23 @@ def build_owner_router(state: AppState) -> Router:
         )
 
     @router.message(owner, Command("settings", "panel"))
-    async def cmd_settings(message: Message, fsm: FSMContext) -> None:
-        await fsm.clear()
-        await show_main(state, message.chat.id)
+    async def cmd_settings(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await show_main(app, message.chat.id)
 
     @router.message(owner, Command("model"))
-    async def cmd_model(message: Message, fsm: FSMContext) -> None:
-        await fsm.clear()
-        await show_models(state, message.chat.id)
+    async def cmd_model(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await show_models(app, message.chat.id)
 
     @router.message(owner, Command("server"))
-    async def cmd_server(message: Message, fsm: FSMContext) -> None:
-        await fsm.clear()
-        await show_server(state, message.chat.id)
+    async def cmd_server(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await show_server(app, message.chat.id)
 
     @router.message(owner, Command("cancel"))
-    async def cmd_cancel(message: Message, fsm: FSMContext) -> None:
-        await fsm.clear()
+    async def cmd_cancel(message: Message, state: FSMContext) -> None:
+        await state.clear()
         await message.answer("Отменено.")
 
     @router.message(owner, Command("allow"))
@@ -299,10 +295,10 @@ def build_owner_router(state: AppState) -> Router:
             await message.answer("Использование: /allow <telegram_id>")
             return
         user_id = int(parts[1])
-        if user_id == state.config.owner_id:
+        if user_id == app.config.owner_id:
             await message.answer("Это ваш ID — владелец и так имеет доступ.")
             return
-        await state.db.allow(user_id)
+        await app.db.allow(user_id)
         await message.answer(f"✅ Пользователь {user_id} добавлен в allowlist.")
 
     @router.message(owner, Command("deny"))
@@ -312,23 +308,23 @@ def build_owner_router(state: AppState) -> Router:
             await message.answer("Использование: /deny <telegram_id>")
             return
         user_id = int(parts[1])
-        if user_id == state.config.owner_id:
+        if user_id == app.config.owner_id:
             await message.answer("Нельзя удалить владельца.")
             return
-        await state.db.deny(user_id)
+        await app.db.deny(user_id)
         await message.answer(f"🗑 Пользователь {user_id} удалён из allowlist.")
 
     # --- ввод значения ---
 
     @router.message(owner, StateFilter(OwnerFlow.value), F.text)
-    async def on_value(message: Message, fsm: FSMContext) -> None:
-        data = await fsm.get_data()
+    async def on_value(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
         key = data.get("key")
         spec = SPECS.get(str(key))
         if spec is None:
-            await fsm.clear()
+            await state.clear()
             await message.answer("Не понял, какой параметр менять. Открываю /settings.")
-            await show_main(state, message.chat.id)
+            await show_main(app, message.chat.id)
             return
         try:
             value = spec.parse(message.text or "")
@@ -338,8 +334,8 @@ def build_owner_router(state: AppState) -> Router:
                 "Отправь значение ещё раз или /cancel."
             )
             return
-        await state.store.set(key, value)
-        await fsm.clear()
+        await app.store.set(key, value)
+        await state.clear()
         note = (
             "\n\n⚠️ Применится после перезапуска сервера."
             if spec.restart
@@ -350,36 +346,36 @@ def build_owner_router(state: AppState) -> Router:
             reply_markup=restart_keyboard() if spec.restart else None,
         )
         if spec.section in SECTIONS:
-            await show_section(state, message.chat.id, None, spec.section)
+            await show_section(app, message.chat.id, None, spec.section)
 
     # --- колбэки меню ---
 
     @router.callback_query(owner, F.data == "menu:main")
-    async def cb_main(callback: CallbackQuery, fsm: FSMContext) -> None:
+    async def cb_main(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
-        await fsm.clear()
-        await show_main(state, callback.message.chat.id, callback.message.message_id)
+        await state.clear()
+        await show_main(app, callback.message.chat.id, callback.message.message_id)
 
     @router.callback_query(owner, F.data.startswith("sec:"))
-    async def cb_section(callback: CallbackQuery, fsm: FSMContext) -> None:
+    async def cb_section(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
-        await fsm.clear()
+        await state.clear()
         section_key = (callback.data or "").split(":", 1)[1]
         await show_section(
-            state, callback.message.chat.id, callback.message.message_id, section_key
+            app, callback.message.chat.id, callback.message.message_id, section_key
         )
 
     @router.callback_query(owner, F.data.startswith("cfg:"))
-    async def cb_cfg(callback: CallbackQuery, fsm: FSMContext) -> None:
+    async def cb_cfg(callback: CallbackQuery, state: FSMContext) -> None:
         key = (callback.data or "").split(":", 1)[1]
         spec = SPECS.get(key)
         if spec is None:
             await callback.answer("Неизвестный параметр", show_alert=True)
             return
         await callback.answer()
-        await fsm.set_state(OwnerFlow.value)
-        await fsm.update_data(key=key)
-        current = state.store.get(key)
+        await state.set_state(OwnerFlow.value)
+        await state.update_data(key=key)
+        current = app.store.get(key)
         await callback.message.edit_text(
             f"{spec.label}\n\n"
             f"Сейчас: {spec.format(current)}\n"
@@ -389,51 +385,51 @@ def build_owner_router(state: AppState) -> Router:
         )
 
     @router.callback_query(owner, F.data.startswith("cyc:"))
-    async def cb_cycle(callback: CallbackQuery, fsm: FSMContext) -> None:
+    async def cb_cycle(callback: CallbackQuery, state: FSMContext) -> None:
         key = (callback.data or "").split(":", 1)[1]
         spec = SPECS.get(key)
         if spec is None or spec.kind != "choice":
             await callback.answer("Неизвестный параметр", show_alert=True)
             return
-        await fsm.clear()
-        current = state.store.get_str(key)
+        await state.clear()
+        current = app.store.get_str(key)
         try:
             index = spec.choices.index(current)
         except ValueError:
             index = -1
         value = spec.choices[(index + 1) % len(spec.choices)]
-        await state.store.set(key, value)
+        await app.store.set(key, value)
         await callback.answer(f"{spec.label}: {value}")
         await show_section(
-            state, callback.message.chat.id, callback.message.message_id, spec.section
+            app, callback.message.chat.id, callback.message.message_id, spec.section
         )
 
     @router.callback_query(owner, F.data == "mdl:menu")
-    async def cb_models(callback: CallbackQuery, fsm: FSMContext) -> None:
+    async def cb_models(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
-        await fsm.clear()
-        await show_models(state, callback.message.chat.id, callback.message.message_id)
+        await state.clear()
+        await show_models(app, callback.message.chat.id, callback.message.message_id)
 
     @router.callback_query(owner, F.data == "mdl:rescan")
-    async def cb_rescan(callback: CallbackQuery, fsm: FSMContext) -> None:
-        await fsm.clear()
+    async def cb_rescan(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
         await show_models(
-            state, callback.message.chat.id, callback.message.message_id, rescan=True
+            app, callback.message.chat.id, callback.message.message_id, rescan=True
         )
-        await callback.answer(f"Найдено моделей: {len(state.models)}")
+        await callback.answer(f"Найдено моделей: {len(app.models)}")
 
     @router.callback_query(owner, F.data.startswith("mdl:"))
-    async def cb_model(callback: CallbackQuery, fsm: FSMContext) -> None:
+    async def cb_model(callback: CallbackQuery, state: FSMContext) -> None:
         model_id = (callback.data or "").split(":", 1)[1]
-        model = next((item for item in state.models if item.id == model_id), None)
+        model = next((item for item in app.models if item.id == model_id), None)
         if model is None:
             await callback.answer("Модель не найдена. Обнови список.", show_alert=True)
             return
         await callback.answer("Переключаю…")
-        await fsm.clear()
-        await state.store.set("model", str(model.path))
+        await state.clear()
+        await app.store.set("model", str(model.path))
         await restart_flow(
-            state,
+            app,
             callback.message.chat.id,
             callback.message.message_id,
             model=model,
@@ -441,63 +437,63 @@ def build_owner_router(state: AppState) -> Router:
         )
 
     @router.callback_query(owner, F.data == "srv:menu")
-    async def cb_server(callback: CallbackQuery, fsm: FSMContext) -> None:
+    async def cb_server(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
-        await fsm.clear()
-        await show_server(state, callback.message.chat.id, callback.message.message_id)
+        await state.clear()
+        await show_server(app, callback.message.chat.id, callback.message.message_id)
 
     @router.callback_query(owner, F.data == "srv:refresh")
     async def cb_refresh(callback: CallbackQuery) -> None:
         await callback.answer()
-        await show_server(state, callback.message.chat.id, callback.message.message_id)
+        await show_server(app, callback.message.chat.id, callback.message.message_id)
 
     @router.callback_query(owner, F.data == "srv:restart")
     async def cb_restart(callback: CallbackQuery) -> None:
         await callback.answer("Перезапускаю…")
         await restart_flow(
-            state, callback.message.chat.id, callback.message.message_id, reason="Перезапускаю"
+            app, callback.message.chat.id, callback.message.message_id, reason="Перезапускаю"
         )
 
     @router.callback_query(owner, F.data == "srv:start")
     async def cb_start(callback: CallbackQuery) -> None:
-        if await state.server.health():
+        if await app.server.health():
             await callback.answer("Сервер уже работает", show_alert=True)
             return
         await callback.answer("Запускаю…")
         await restart_flow(
-            state, callback.message.chat.id, callback.message.message_id, reason="Запускаю сервер"
+            app, callback.message.chat.id, callback.message.message_id, reason="Запускаю сервер"
         )
 
     @router.callback_query(owner, F.data == "srv:stop")
     async def cb_stop(callback: CallbackQuery) -> None:
         await callback.answer("Останавливаю…")
         await _send_or_edit(
-            state, callback.message.chat.id, callback.message.message_id, "⏳ Останавливаю…"
+            app, callback.message.chat.id, callback.message.message_id, "⏳ Останавливаю…"
         )
-        if state.gate.locked():
+        if app.gate.locked():
             await _send_or_edit(
-                state,
+                app,
                 callback.message.chat.id,
                 callback.message.message_id,
                 "⏳ Жду завершения текущего ответа…",
             )
-        async with state.gate:
-            await state.server.stop()
-        await show_server(state, callback.message.chat.id, callback.message.message_id)
+        async with app.gate:
+            await app.server.stop()
+        await show_server(app, callback.message.chat.id, callback.message.message_id)
 
     @router.callback_query(owner, F.data == "srv:logs")
     async def cb_logs(callback: CallbackQuery) -> None:
         await callback.answer()
-        tail = await _read_log(state)
-        await state.bot.send_message(callback.message.chat.id, tail)
+        tail = _read_log(app)
+        await app.bot.send_message(callback.message.chat.id, tail)
 
     @router.callback_query(owner, F.data == "ctx:clear")
-    async def cb_clear(callback: CallbackQuery, fsm: FSMContext) -> None:
-        await fsm.clear()
-        task = state.tasks.get(state.config.owner_id)
+    async def cb_clear(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        task = app.tasks.get(app.config.owner_id)
         if task is not None and not task.done():
             task.cancel()
-        count = await state.db.clear_messages(state.config.owner_id)
+        count = await app.db.clear_messages(app.config.owner_id)
         await callback.answer(f"Удалено: {count}", show_alert=True)
 
     @router.callback_query(owner, F.data.startswith("deny:"))
@@ -507,18 +503,18 @@ def build_owner_router(state: AppState) -> Router:
             await callback.answer("Некорректный ID", show_alert=True)
             return
         user_id = int(raw)
-        if user_id == state.config.owner_id:
+        if user_id == app.config.owner_id:
             await callback.answer("Нельзя удалить владельца", show_alert=True)
             return
-        await state.db.deny(user_id)
+        await app.db.deny(user_id)
         await callback.answer(f"{user_id} удалён")
-        await show_access(state, callback.message.chat.id, callback.message.message_id)
+        await show_access(app, callback.message.chat.id, callback.message.message_id)
 
     return router
 
 
-async def _read_log(state: AppState) -> str:
-    tail = state.server.log_tail(3600)
+def _read_log(app: AppState) -> str:
+    tail = app.server.log_tail(3600)
     if len(tail) > 3900:
         tail = tail[-3900:]
     return "📜 Последние строки llama-server.log:\n\n" + tail
